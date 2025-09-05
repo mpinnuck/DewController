@@ -1,0 +1,5 @@
+{
+  "com_port": "COM18",
+  "mode": "MANUAL",
+  "rh_threshold": 80.0
+}
