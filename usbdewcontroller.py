@@ -1,3 +1,5 @@
+import sys
+import ctypes
 import tkinter as tk
 from tkinter import ttk, scrolledtext
 import threading
@@ -8,13 +10,36 @@ import requests
 import os
 import json
 
+# ------------ Commands to buid executable ------------
+# .venv\Scripts\activate.ps1
+# pyinstaller --onefile --noconsole --name usbdewcontroller --add-data "config.json;." usbdewcontroller.py
+
 # ---------------- CONFIGURATION ----------------
-VERSION = "Version: 1.2"
+VERSION = "Version: 1.3"
 CONFIG_FILE = "config.json"
 DEFAULT_RH_THRESHOLD = 80
 WEATHER_API_URL = "https://api.weather.com/v2/pws/observations/current?stationId=ISYDNEY478&format=json&units=m&apiKey=5356e369de454c6f96e369de450c6f22"
 REFRESH_INTERVAL = 5       # seconds for AUTO heater check
 HUMIDITY_POLL_INTERVAL = 60  # seconds for fetching current RH
+
+#"""
+# ---------------- SINGLE INSTANCE (Windows only) ----------------
+def check_single_instance():
+    # Ensure only one instance of the app is running on Windows using a mutex.
+    mutex_name = "USBDEWCONTROLLER_MUTEX"
+
+    # Create a mutex
+    kernel32 = ctypes.windll.kernel32
+    mutex = kernel32.CreateMutexW(None, ctypes.c_bool(False), mutex_name)
+
+    # ERROR_ALREADY_EXISTS = 183
+    if kernel32.GetLastError() == 183:
+        # Another instance exists, silently exit
+        sys.exit(0)
+
+# Call this at the very start of your script
+check_single_instance()
+#"""
 
 # ---------------- GUI APP ----------------
 class DewHeaterController(tk.Tk):
