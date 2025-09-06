@@ -15,12 +15,13 @@ import json
 # pyinstaller --onefile --noconsole --name usbdewcontroller --add-data "config.json;." usbdewcontroller.py
 
 # ---------------- CONFIGURATION ----------------
-VERSION = "Version: 1.3"
+VERSION = "Version: 1.4"
 CONFIG_FILE = "config.json"
 DEFAULT_RH_THRESHOLD = 80
 WEATHER_API_URL = "https://api.weather.com/v2/pws/observations/current?stationId=ISYDNEY478&format=json&units=m&apiKey=5356e369de454c6f96e369de450c6f22"
 REFRESH_INTERVAL = 5       # seconds for AUTO heater check
 HUMIDITY_POLL_INTERVAL = 60  # seconds for fetching current RH
+HYSTERESIS = 1  # 1% RH
 
 #"""
 # ---------------- SINGLE INSTANCE (Windows only) ----------------
@@ -227,13 +228,21 @@ class DewHeaterController(tk.Tk):
         while self.running:
             try:
                 if self.mode.get() == "AUTO":
-                    rh_threshold = float(self.entry_rh.get())
-                    self.rh_threshold = rh_threshold
+                    try:
+                        rh_threshold = float(self.entry_rh.get())
+                        self.rh_threshold = rh_threshold
+                    except ValueError:
+                        self.log("Invalid RH threshold input")
+                        time.sleep(REFRESH_INTERVAL)
+                        continue
+
                     rh = self.current_rh.get()
-                    if rh >= self.rh_threshold and not self.heater_on:
+                    # Hysteresis control
+                    if not self.heater_on and rh >= (self.rh_threshold + HYSTERESIS):
                         self.send_relay_command(True)
-                    elif rh < self.rh_threshold and self.heater_on:
+                    elif self.heater_on and rh <= (self.rh_threshold - HYSTERESIS):
                         self.send_relay_command(False)
+
             except Exception as e:
                 self.log(f"Auto-monitoring error: {e}")
             time.sleep(REFRESH_INTERVAL)
