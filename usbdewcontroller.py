@@ -17,7 +17,7 @@ import json
 # -----------------------------------------------------
 
 # ---------------- CONFIGURATION ----------------
-VERSION = "Version: 1.6"
+VERSION = "Version: 1.7"
 CONFIG_FILE = "config.json"
 DEFAULT_DEWSPREAD_THRESHOLD = 3.0  # °C
 HYSTERESIS_DEW = 1.0  # °C for heater off
@@ -224,8 +224,10 @@ class DewHeaterController(tk.Tk):
     def toggle_manual(self):
         if self.heater_on:
             self.send_relay_command(False)
+            self.btn_manual.config(text="TURN ON")   # update button text
         else:
             self.send_relay_command(True)
+            self.btn_manual.config(text="TURN OFF")  # update button text
 
     def send_relay_command(self, turn_on):
         if self.serial_port and self.serial_port.is_open:
