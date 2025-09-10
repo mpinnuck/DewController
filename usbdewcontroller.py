@@ -10,37 +10,30 @@ import requests
 import os
 import json
 
-# ------------ Commands to buid executable ------------
+# ------------ Commands to build executable ------------
 # .venv\Scripts\activate.ps1
 # pyinstaller --onefile --noconsole --name usbdewcontroller --add-data "config.json;." usbdewcontroller.py
+# copy dist/usbdewcontroller.exe d:/astro/apps/UsbDewController
+# -----------------------------------------------------
 
 # ---------------- CONFIGURATION ----------------
-VERSION = "Version: 1.4"
+VERSION = "Version: 1.6"
 CONFIG_FILE = "config.json"
-DEFAULT_RH_THRESHOLD = 80
+DEFAULT_DEWSPREAD_THRESHOLD = 3.0  # °C
+HYSTERESIS_DEW = 1.0  # °C for heater off
 WEATHER_API_URL = "https://api.weather.com/v2/pws/observations/current?stationId=ISYDNEY478&format=json&units=m&apiKey=5356e369de454c6f96e369de450c6f22"
 REFRESH_INTERVAL = 5       # seconds for AUTO heater check
-HUMIDITY_POLL_INTERVAL = 60  # seconds for fetching current RH
-HYSTERESIS = 1  # 1% RH
+HUMIDITY_POLL_INTERVAL = 60  # seconds for fetching current weather
 
-#"""
 # ---------------- SINGLE INSTANCE (Windows only) ----------------
 def check_single_instance():
-    # Ensure only one instance of the app is running on Windows using a mutex.
     mutex_name = "USBDEWCONTROLLER_MUTEX"
-
-    # Create a mutex
     kernel32 = ctypes.windll.kernel32
     mutex = kernel32.CreateMutexW(None, ctypes.c_bool(False), mutex_name)
-
-    # ERROR_ALREADY_EXISTS = 183
     if kernel32.GetLastError() == 183:
-        # Another instance exists, silently exit
         sys.exit(0)
 
-# Call this at the very start of your script
 check_single_instance()
-#"""
 
 # ---------------- GUI APP ----------------
 class DewHeaterController(tk.Tk):
@@ -51,8 +44,8 @@ class DewHeaterController(tk.Tk):
         self.config_data = self.load_config()
 
         self.title("Dew Heater Controller")
-        self.geometry("500x500")
-        self.minsize(500, 300)
+        self.geometry("600x450")
+        self.minsize(600, 300)
 
         # ---------------- Center the window ----------------
         self.update_idletasks()
@@ -65,8 +58,11 @@ class DewHeaterController(tk.Tk):
         # ---------------- State Variables ----------------
         self.serial_port = None
         self.mode = tk.StringVar(value=self.config_data.get("mode", "AUTO"))
-        self.rh_threshold = self.config_data.get("rh_threshold", DEFAULT_RH_THRESHOLD)
-        self.current_rh = tk.DoubleVar(value=0.0)
+        self.dewspread_threshold = self.config_data.get("dewspread_threshold", DEFAULT_DEWSPREAD_THRESHOLD)
+        self.current_dewpoint = tk.DoubleVar(value=0.0)
+        self.current_temp = tk.DoubleVar(value=0.0)
+        self.current_dewspread = tk.DoubleVar(value=0.0)
+        self.current_rh = tk.StringVar(value="0")
         self.heater_on = False
         self.running = True
 
@@ -81,7 +77,7 @@ class DewHeaterController(tk.Tk):
 
         self.btn_connect = tk.Button(self, text="Connect", command=self.toggle_connection)
         self.btn_connect.grid(row=0, column=2, padx=5, pady=5, sticky="w")
-        # ---------------- Version Label ----------------
+        # Version label
         self.lbl_version = tk.Label(self, text = VERSION, fg="blue")
         self.lbl_version.grid(row=0, column=3, padx=5, pady=5, sticky="e")
 
@@ -95,39 +91,61 @@ class DewHeaterController(tk.Tk):
             command=self.toggle_manual
         )
         self.btn_manual.grid(row=1, column=1, padx=5, pady=5, sticky="w")
-        # Heater Status Label (same width as buttons)
+
         self.lbl_heater_status = tk.Label(
             self, text="OFF", width=15, bg="red", fg="black", relief="sunken"
         )
         self.lbl_heater_status.grid(row=1, column=2, padx=5, pady=5, sticky="w")
-    
-        # Row 2: RH Threshold and Current RH
-        tk.Label(self, text="RH Threshold %:").grid(row=2, column=0, padx=5, pady=5, sticky="w")
-        self.entry_rh = tk.Entry(self, width=5)
-        self.entry_rh.insert(0, str(self.rh_threshold))
-        self.entry_rh.grid(row=2, column=1, padx=5, pady=5, sticky="w")
 
-        tk.Label(self, text="Current RH %:").grid(row=2, column=2, padx=5, pady=5, sticky="w")
-        self.label_current_rh = tk.Label(self, textvariable=self.current_rh)
-        self.label_current_rh.grid(row=2, column=3, padx=5, pady=5, sticky="w")
+        # ---------------- Current Relative Humidity ----------------
+        tk.Label(self, text="Current RH %:").grid(row=1, column=3, padx=5, pady=5, sticky="w")
+        self.label_current_rh = tk.Label(self, textvariable=self.current_rh, bg="#d3d3d3", padx=5, pady=2, relief="sunken")
+        self.label_current_rh.grid(row=1, column=4, padx=5, pady=5, sticky="w")
+
+        # Row 2: Dew Spread Trigger, Dew Spread, Temperature, Dew Point
+        row2_frame = tk.Frame(self)
+        row2_frame.grid(row=2, column=0, columnspan=8, sticky="ew", padx=5, pady=5)
+
+        # Dew Spread Trigger (entry)
+        tk.Label(row2_frame, text="Dew Spread Trigger °C:").pack(side=tk.LEFT, padx=5)
+        self.entry_dewspread = tk.Entry(row2_frame, width=5)
+        self.entry_dewspread.insert(0, str(self.dewspread_threshold))
+        self.entry_dewspread.pack(side=tk.LEFT, padx=(0, 15))  # extra padding to separate from values
+
+        # Current Dew Spread (value label)
+        tk.Label(row2_frame, text="Dew Spread °C:").pack(side=tk.LEFT, padx=5)
+        tk.Label(row2_frame, textvariable=self.current_dewspread, 
+                bg="#d3d3d3", padx=5, pady=2, relief="sunken").pack(side=tk.LEFT, padx=(0, 15))
+
+        # Current Temperature (value label)
+        tk.Label(row2_frame, text="Temp °C:").pack(side=tk.LEFT, padx=5)
+        tk.Label(row2_frame, textvariable=self.current_temp, 
+                bg="#d3d3d3", padx=5, pady=2, relief="sunken").pack(side=tk.LEFT, padx=(0, 15))
+
+        # Current Dew Point (value label)
+        tk.Label(row2_frame, text="Dew Point °C:").pack(side=tk.LEFT, padx=5)
+        tk.Label(row2_frame, textvariable=self.current_dewpoint, 
+                bg="#d3d3d3", padx=5, pady=2, relief="sunken").pack(side=tk.LEFT, padx=5)
+
+        # Make the frame expand horizontally
+        row2_frame.columnconfigure(0, weight=1)
 
         # Row 3: Log box
         self.log_text = scrolledtext.ScrolledText(self, wrap=tk.WORD)
-        self.log_text.grid(row=3, column=0, columnspan=4, padx=5, pady=5, sticky="nsew")
+        self.log_text.grid(row=3, column=0, columnspan=8, padx=5, pady=5, sticky="nsew")
 
         # Configure resizing
         self.grid_rowconfigure(3, weight=1)
-        self.grid_columnconfigure(3, weight=1)
+        self.grid_columnconfigure(7, weight=1)
 
-        # Start threads
+        # Threads
         threading.Thread(target=self.auto_monitor, daemon=True).start()
-        threading.Thread(target=self.poll_current_rh, daemon=True).start()
-        self.refresh_serial_ports()  # Dynamic COM port updates
+        threading.Thread(target=self.poll_current_weather, daemon=True).start()
+        self.refresh_serial_ports()
 
-        # Bind close event
         self.protocol("WM_DELETE_WINDOW", self.on_close)
 
-        # Attempt to auto-connect to previously saved COM port
+        # Auto-connect previous port
         saved_port = self.config_data.get("com_port")
         if saved_port and saved_port in self.combobox_ports['values']:
             self.combobox_ports.set(saved_port)
@@ -139,7 +157,6 @@ class DewHeaterController(tk.Tk):
             except Exception as e:
                 self.serial_port = None
                 self.log(f"Auto-connect failed: {e}")
-
 
     # ---------------- Helper Methods ----------------
     def log(self, message):
@@ -153,7 +170,6 @@ class DewHeaterController(tk.Tk):
     def refresh_serial_ports(self):
         current_ports = set(self.combobox_ports['values'])
         detected_ports = set(self.get_serial_ports())
-
         if current_ports != detected_ports:
             selected = self.combobox_ports.get()
             self.combobox_ports['values'] = list(detected_ports)
@@ -162,7 +178,6 @@ class DewHeaterController(tk.Tk):
             else:
                 self.combobox_ports.set('')
                 self.log("COM port list updated")
-
         self.after(3000, self.refresh_serial_ports)
 
     # ---------------- Serial Connection ----------------
@@ -175,89 +190,106 @@ class DewHeaterController(tk.Tk):
         else:
             port = self.combobox_ports.get()
             if not port:
-                self.log("Select a COM port first")
+                self.log("No COM port selected")
                 return
             try:
                 self.serial_port = serial.Serial(port, 9600, timeout=1)
                 self.btn_connect.config(text="Disconnect")
                 self.log(f"Connected to {port}")
+                self.save_config()
             except Exception as e:
-                self.log(f"Failed to connect: {e}")
                 self.serial_port = None
+                self.log(f"Connection failed: {e}")
 
-    # ---------------- Mode / Manual ----------------
+    # ---------------- Mode and Manual ----------------
     def toggle_mode(self):
         if self.mode.get() == "AUTO":
             self.mode.set("MANUAL")
             self.btn_manual.config(state="normal")
+            
+            # Update manual heater button text to reflect current heater state
+            if self.heater_on:
+                self.btn_manual.config(text="TURN OFF")
+            else:
+                self.btn_manual.config(text="TURN ON")
         else:
             self.mode.set("AUTO")
             self.btn_manual.config(state="disabled")
+        
         self.btn_mode.config(text=f"Mode: {self.mode.get()}")
+        self.save_config()
         self.log(f"Mode changed to {self.mode.get()}")
 
+
     def toggle_manual(self):
-        self.log(f"Manual heater toggled")
-        if not self.serial_port or not self.serial_port.is_open:
-            self.log("Connect to COM port first")
-            return
         if self.heater_on:
             self.send_relay_command(False)
         else:
             self.send_relay_command(True)
 
-    def send_relay_command(self, turn_on: bool):
-        """Send command to USB relay and update heater status label"""
-        try:
-            if turn_on:
-                if self.serial_port and self.serial_port.is_open:
-                    self.serial_port.write(b'\xA0\x01\x01\xA2')  # Example ON command
-                self.lbl_heater_status.config(text="ON", bg="green", fg="white")
-                self.log("Heater turned ON")  # Log event
-            else:
-                if self.serial_port and self.serial_port.is_open:
-                    self.serial_port.write(b'\xA0\x01\x00\xA1')  # Example OFF command
-                self.lbl_heater_status.config(text="OFF", bg="red", fg="black")
-                self.log("Heater turned OFF")  # Log event
-            self.heater_on = turn_on
-        except Exception as e:
-            self.log(f"Error sending relay command: {e}")
+    def send_relay_command(self, turn_on):
+        if self.serial_port and self.serial_port.is_open:
+            try:
+                cmd = b'ON\n' if turn_on else b'OFF\n'
+                self.serial_port.write(cmd)
+                self.heater_on = turn_on
+                self.lbl_heater_status.config(
+                    text="ON" if turn_on else "OFF",
+                    bg="green" if turn_on else "red"
+                )
+                self.log(f"Heater turned {'ON' if turn_on else 'OFF'}")
+            except Exception as e:
+                self.log(f"Serial write failed: {e}")
+        else:
+            self.log("Serial port not connected")
 
-    # ---------------- AUTO Heater Monitoring ----------------
+    # ---------------- AUTO Monitoring ----------------
     def auto_monitor(self):
         while self.running:
             try:
                 if self.mode.get() == "AUTO":
                     try:
-                        rh_threshold = float(self.entry_rh.get())
-                        self.rh_threshold = rh_threshold
+                        self.dewspread_threshold = float(self.entry_dewspread.get())
                     except ValueError:
-                        self.log("Invalid RH threshold input")
+                        self.log("Invalid Dew Spread threshold input")
                         time.sleep(REFRESH_INTERVAL)
                         continue
 
-                    rh = self.current_rh.get()
-                    # Hysteresis control
-                    if not self.heater_on and rh >= (self.rh_threshold + HYSTERESIS):
+                    dewspread = self.current_dewspread.get()
+                    if not self.heater_on and dewspread <= self.dewspread_threshold:
                         self.send_relay_command(True)
-                    elif self.heater_on and rh <= (self.rh_threshold - HYSTERESIS):
+                    elif self.heater_on and dewspread >= (self.dewspread_threshold + HYSTERESIS_DEW):
                         self.send_relay_command(False)
 
             except Exception as e:
                 self.log(f"Auto-monitoring error: {e}")
+
             time.sleep(REFRESH_INTERVAL)
 
-    # ---------------- Current Humidity Polling ----------------
-    def poll_current_rh(self):
+    # ---------------- Poll Weather ----------------
+    def poll_current_weather(self):
         while self.running:
             try:
                 response = requests.get(WEATHER_API_URL, timeout=10)
-                data = response.json()
-                rh = data['observations'][0]['humidity']
-                self.current_rh.set(rh)
+                data = response.json()['observations'][0]
+                metric = data['metric']
+                
+                temp = metric['temp']
+                dewpt = metric['dewpt']
+                rh = data.get('humidity')  
+
+                # Update Tkinter variables
+                self.current_temp.set(round(temp, 1))
+                self.current_dewpoint.set(round(dewpt, 1))
+                self.current_dewspread.set(round(temp - dewpt, 2))
+                if rh is not None:
+                    self.current_rh.set(round(rh, 1))
+
             except Exception as e:
-                self.log(f"Error fetching current RH: {e}")
+                self.log(f"Error fetching weather data: {e}")
+
             time.sleep(HUMIDITY_POLL_INTERVAL)
+
 
     # ---------------- Config Persistence ----------------
     def load_config(self):
@@ -265,41 +297,28 @@ class DewHeaterController(tk.Tk):
             try:
                 with open(CONFIG_FILE, "r") as f:
                     return json.load(f)
-            except Exception as e:
-                self.log(f"Error loading config: {e}")
+            except Exception:
+                return {}
         return {}
 
-    # ---------------- Config Persistence ----------------
     def save_config(self):
-        """Save current settings to config.json"""
         try:
-            self.config_data["com_port"] = self.combobox_ports.get()
             self.config_data["mode"] = self.mode.get()
-            try:
-                # Attempt to save the RH threshold from the entry
-                self.config_data["rh_threshold"] = float(self.entry_rh.get())
-            except ValueError:
-                # If invalid, keep previous value or default
-                self.config_data["rh_threshold"] = self.config_data.get("rh_threshold", DEFAULT_RH_THRESHOLD)
-
+            self.config_data["dewspread_threshold"] = self.dewspread_threshold
+            self.config_data["com_port"] = self.combobox_ports.get()
             with open(CONFIG_FILE, "w") as f:
-                json.dump(self.config_data, f, indent=4)
-
-            self.log("Settings saved successfully")
+                json.dump(self.config_data, f)
         except Exception as e:
-            self.log(f"Error saving settings: {e}")
+            self.log(f"Failed to save config: {e}")
 
-    # ---------------- Close Event ----------------
+    # ---------------- Clean Exit ----------------
     def on_close(self):
         self.running = False
-        time.sleep(0.5)  # Allow threads to finish
         if self.serial_port and self.serial_port.is_open:
             self.serial_port.close()
-            self.log("Serial port closed")
-        self.save_config()
         self.destroy()
 
-# ---------------- RUN APP ----------------
+# ---------------- MAIN ----------------
 if __name__ == "__main__":
     app = DewHeaterController()
     app.mainloop()
