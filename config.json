@@ -1,1 +1,1 @@
-{"com_port": "COM18", "mode": "MANUAL", "rh_threshold": 80.0, "dewspread_threshold": 3.0}
+{"com_port": "COM18", "mode": "AUTO", "rh_threshold": 80.0, "dewspread_threshold": 3.0}

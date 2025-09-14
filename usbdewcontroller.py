@@ -17,13 +17,19 @@ import json
 # -----------------------------------------------------
 
 # ---------------- CONFIGURATION ----------------
-VERSION = "Version: 1.7"
+VERSION = "Version: 1.8"
 CONFIG_FILE = "config.json"
 DEFAULT_DEWSPREAD_THRESHOLD = 3.0  # °C
 HYSTERESIS_DEW = 1.0  # °C for heater off
 WEATHER_API_URL = "https://api.weather.com/v2/pws/observations/current?stationId=ISYDNEY478&format=json&units=m&apiKey=5356e369de454c6f96e369de450c6f22"
 REFRESH_INTERVAL = 5       # seconds for AUTO heater check
 HUMIDITY_POLL_INTERVAL = 60  # seconds for fetching current weather
+HEATER_ON_COLOR = "#90EE90"       # Light green for heater ON
+HEATER_OFF_COLOR = "#FFB6C1"      # Light red/pink for heater OFF
+
+# ---------------- GUI COLORS ----------------
+MODE_AUTO_COLOR = "#90EE90"  # Light green for AUTO mode
+MODE_MANUAL_COLOR = "SystemButtonFace"  # Default button color
 
 # ---------------- SINGLE INSTANCE (Windows only) ----------------
 def check_single_instance():
@@ -40,22 +46,13 @@ class DewHeaterController(tk.Tk):
     def __init__(self):
         super().__init__()
 
+        # Hide window initially
+        self.withdraw()
+
         # Load persisted config
         self.config_data = self.load_config()
 
-        self.title("Dew Heater Controller")
-        self.geometry("600x450")
-        self.minsize(600, 300)
-
-        # ---------------- Center the window ----------------
-        self.update_idletasks()
-        width = self.winfo_width()
-        height = self.winfo_height()
-        x = (self.winfo_screenwidth() // 2) - (width // 2)
-        y = (self.winfo_screenheight() // 2) - (height // 2)
-        self.geometry(f"{width}x{height}+{x}+{y}")
-
-        # ---------------- State Variables ----------------
+        # State variables
         self.serial_port = None
         self.mode = tk.StringVar(value=self.config_data.get("mode", "AUTO"))
         self.dewspread_threshold = self.config_data.get("dewspread_threshold", DEFAULT_DEWSPREAD_THRESHOLD)
@@ -66,8 +63,52 @@ class DewHeaterController(tk.Tk):
         self.heater_on = False
         self.running = True
 
-        # ---------------- GUI Layout ----------------
-        # Row 0: COM Port selection
+        # Build the GUI
+        self.build_gui()
+        self.update_idletasks()
+        self.center_window()
+
+        #  Fetch initial weather to populate GUI before threads start
+        self.fetch_weather()  
+
+        # Set initial mode button color
+        if self.mode.get() == "AUTO":
+            self.btn_mode.config(bg=MODE_AUTO_COLOR)
+        else:
+            self.btn_mode.config(bg=MODE_MANUAL_COLOR)
+
+        # Show window now that everything is ready
+        self.deiconify()
+
+
+        # Threads
+        threading.Thread(target=self.auto_monitor, daemon=True).start()
+        threading.Thread(target=self.poll_current_weather, daemon=True).start()
+        self.refresh_serial_ports()
+
+        # Auto-connect previous port
+        self.auto_connect_previous_port()
+
+        # Close protocol
+        self.protocol("WM_DELETE_WINDOW", self.on_close)
+
+
+    def center_window(self):
+        """Center the main window on the screen."""
+        self.update_idletasks()  # ensure geometry info is up-to-date
+        width = self.winfo_width()
+        height = self.winfo_height()
+        x = (self.winfo_screenwidth() // 2) - (width // 2)
+        y = (self.winfo_screenheight() // 2) - (height // 2)
+        self.geometry(f"{width}x{height}+{x}+{y}")
+
+    # ---------------- GUI BUILD ----------------
+    def build_gui(self):
+        self.title("Dew Heater Controller")
+        self.geometry("600x450")
+        self.minsize(600, 300)
+
+        # ---------------- Row 0: COM Port ----------------
         tk.Label(self, text="COM Port:").grid(row=0, column=0, padx=5, pady=5, sticky="w")
         self.combobox_ports = ttk.Combobox(self, values=self.get_serial_ports(), state="readonly")
         self.combobox_ports.grid(row=0, column=1, padx=5, pady=5, sticky="w")
@@ -77,11 +118,11 @@ class DewHeaterController(tk.Tk):
 
         self.btn_connect = tk.Button(self, text="Connect", command=self.toggle_connection)
         self.btn_connect.grid(row=0, column=2, padx=5, pady=5, sticky="w")
-        # Version label
-        self.lbl_version = tk.Label(self, text = VERSION, fg="blue")
+
+        self.lbl_version = tk.Label(self, text=VERSION, fg="blue")
         self.lbl_version.grid(row=0, column=3, padx=5, pady=5, sticky="e")
 
-        # Row 1: Mode and Manual On/Off
+        # ---------------- Row 1: Mode + Manual ----------------
         self.btn_mode = tk.Button(self, text=f"Mode: {self.mode.get()}", width=15, command=self.toggle_mode)
         self.btn_mode.grid(row=1, column=0, padx=5, pady=5, sticky="w")
 
@@ -96,56 +137,43 @@ class DewHeaterController(tk.Tk):
             self, text="OFF", width=15, bg="red", fg="black", relief="sunken"
         )
         self.lbl_heater_status.grid(row=1, column=2, padx=5, pady=5, sticky="w")
+        # Initialize heater label color
+        self.lbl_heater_status.config(
+            bg=HEATER_ON_COLOR if self.heater_on else HEATER_OFF_COLOR
+        )
 
-        # ---------------- Current Relative Humidity ----------------
         tk.Label(self, text="Current RH %:").grid(row=1, column=3, padx=5, pady=5, sticky="w")
         self.label_current_rh = tk.Label(self, textvariable=self.current_rh, bg="#d3d3d3", padx=5, pady=2, relief="sunken")
         self.label_current_rh.grid(row=1, column=4, padx=5, pady=5, sticky="w")
 
-        # Row 2: Dew Spread Trigger, Dew Spread, Temperature, Dew Point
+        # ---------------- Row 2: Dew Spread + Temp + Dew Point ----------------
         row2_frame = tk.Frame(self)
         row2_frame.grid(row=2, column=0, columnspan=8, sticky="ew", padx=5, pady=5)
 
-        # Dew Spread Trigger (entry)
         tk.Label(row2_frame, text="Dew Spread Trigger °C:").pack(side=tk.LEFT, padx=5)
         self.entry_dewspread = tk.Entry(row2_frame, width=5)
         self.entry_dewspread.insert(0, str(self.dewspread_threshold))
-        self.entry_dewspread.pack(side=tk.LEFT, padx=(0, 15))  # extra padding to separate from values
+        self.entry_dewspread.pack(side=tk.LEFT, padx=(0, 15))
 
-        # Current Dew Spread (value label)
         tk.Label(row2_frame, text="Dew Spread °C:").pack(side=tk.LEFT, padx=5)
-        tk.Label(row2_frame, textvariable=self.current_dewspread, 
-                bg="#d3d3d3", padx=5, pady=2, relief="sunken").pack(side=tk.LEFT, padx=(0, 15))
+        tk.Label(row2_frame, textvariable=self.current_dewspread, bg="#d3d3d3", padx=5, pady=2, relief="sunken").pack(side=tk.LEFT, padx=(0, 15))
 
-        # Current Temperature (value label)
         tk.Label(row2_frame, text="Temp °C:").pack(side=tk.LEFT, padx=5)
-        tk.Label(row2_frame, textvariable=self.current_temp, 
-                bg="#d3d3d3", padx=5, pady=2, relief="sunken").pack(side=tk.LEFT, padx=(0, 15))
+        tk.Label(row2_frame, textvariable=self.current_temp, bg="#d3d3d3", padx=5, pady=2, relief="sunken").pack(side=tk.LEFT, padx=(0, 15))
 
-        # Current Dew Point (value label)
         tk.Label(row2_frame, text="Dew Point °C:").pack(side=tk.LEFT, padx=5)
-        tk.Label(row2_frame, textvariable=self.current_dewpoint, 
-                bg="#d3d3d3", padx=5, pady=2, relief="sunken").pack(side=tk.LEFT, padx=5)
+        tk.Label(row2_frame, textvariable=self.current_dewpoint, bg="#d3d3d3", padx=5, pady=2, relief="sunken").pack(side=tk.LEFT, padx=5)
 
-        # Make the frame expand horizontally
         row2_frame.columnconfigure(0, weight=1)
 
-        # Row 3: Log box
+        # ---------------- Row 3: Log ----------------
         self.log_text = scrolledtext.ScrolledText(self, wrap=tk.WORD)
         self.log_text.grid(row=3, column=0, columnspan=8, padx=5, pady=5, sticky="nsew")
-
-        # Configure resizing
         self.grid_rowconfigure(3, weight=1)
         self.grid_columnconfigure(7, weight=1)
 
-        # Threads
-        threading.Thread(target=self.auto_monitor, daemon=True).start()
-        threading.Thread(target=self.poll_current_weather, daemon=True).start()
-        self.refresh_serial_ports()
-
-        self.protocol("WM_DELETE_WINDOW", self.on_close)
-
-        # Auto-connect previous port
+    # ---------------- Auto-connect previous COM ----------------
+    def auto_connect_previous_port(self):
         saved_port = self.config_data.get("com_port")
         if saved_port and saved_port in self.combobox_ports['values']:
             self.combobox_ports.set(saved_port)
@@ -157,7 +185,7 @@ class DewHeaterController(tk.Tk):
             except Exception as e:
                 self.serial_port = None
                 self.log(f"Auto-connect failed: {e}")
-
+                
     # ---------------- Helper Methods ----------------
     def log(self, message):
         timestamp = time.strftime("%H:%M:%S")
@@ -206,8 +234,9 @@ class DewHeaterController(tk.Tk):
         if self.mode.get() == "AUTO":
             self.mode.set("MANUAL")
             self.btn_manual.config(state="normal")
-            
-            # Update manual heater button text to reflect current heater state
+            self.btn_mode.config(bg=MODE_MANUAL_COLOR)  # Use constant
+
+            # Update manual heater button text
             if self.heater_on:
                 self.btn_manual.config(text="TURN OFF")
             else:
@@ -215,11 +244,11 @@ class DewHeaterController(tk.Tk):
         else:
             self.mode.set("AUTO")
             self.btn_manual.config(state="disabled")
-        
+            self.btn_mode.config(bg=MODE_AUTO_COLOR)  # Use constant
+
         self.btn_mode.config(text=f"Mode: {self.mode.get()}")
         self.save_config()
         self.log(f"Mode changed to {self.mode.get()}")
-
 
     def toggle_manual(self):
         if self.heater_on:
@@ -229,16 +258,29 @@ class DewHeaterController(tk.Tk):
             self.send_relay_command(True)
             self.btn_manual.config(text="TURN OFF")  # update button text
 
+    # ---------------- Send Relay Command ----------------
     def send_relay_command(self, turn_on):
         if self.serial_port and self.serial_port.is_open:
             try:
-                cmd = b'ON\n' if turn_on else b'OFF\n'
+                start_id = 0xA0
+                switch_addr = 0x01
+                op_data = 0x01 if turn_on else 0x00
+                checksum = (start_id + switch_addr + op_data) & 0xFF  # simple sum & mask
+                cmd = bytes([start_id, switch_addr, op_data, checksum])
+
                 self.serial_port.write(cmd)
                 self.heater_on = turn_on
+
+                # Update GUI
                 self.lbl_heater_status.config(
                     text="ON" if turn_on else "OFF",
-                    bg="green" if turn_on else "red"
+                    bg=HEATER_ON_COLOR if turn_on else HEATER_OFF_COLOR,
+                    fg="black"
                 )
+                self.btn_manual.config(
+                    text="TURN OFF" if turn_on else "TURN ON"
+                )
+
                 self.log(f"Heater turned {'ON' if turn_on else 'OFF'}")
             except Exception as e:
                 self.log(f"Serial write failed: {e}")
@@ -268,30 +310,40 @@ class DewHeaterController(tk.Tk):
 
             time.sleep(REFRESH_INTERVAL)
 
+    
+    def fetch_weather(self):
+        try:
+            response = requests.get(WEATHER_API_URL, timeout=10)
+            data = response.json()['observations'][0]
+            metric = data['metric']
+            
+            temp = metric['temp']
+            dewpt = metric['dewpt']
+            rh = data.get('humidity')
+
+            # Instead of updating Tk variables directly here in the thread:
+            self.after(0, self.update_weather_gui, temp, dewpt, rh)
+
+            self.log(f"Weather update: Temp={temp}°C, Dew={dewpt}°C, DewSpread={temp - dewpt}°C, RH={rh}%")
+            return temp, dewpt, rh
+
+        except Exception as e:
+            self.log(f"Failed to fetch weather: {e}")
+            return 0.0, 0.0, 0
+
+    def update_weather_gui(self, temp, dewpt, rh):
+        """This runs safely in the GUI thread."""
+        self.current_temp.set(round(temp, 1))
+        self.current_dewpoint.set(round(dewpt, 1))
+        self.current_dewspread.set(round(temp - dewpt, 2))
+        if rh is not None:
+            self.current_rh.set(round(rh, 1))
+    
     # ---------------- Poll Weather ----------------
     def poll_current_weather(self):
         while self.running:
-            try:
-                response = requests.get(WEATHER_API_URL, timeout=10)
-                data = response.json()['observations'][0]
-                metric = data['metric']
-                
-                temp = metric['temp']
-                dewpt = metric['dewpt']
-                rh = data.get('humidity')  
-
-                # Update Tkinter variables
-                self.current_temp.set(round(temp, 1))
-                self.current_dewpoint.set(round(dewpt, 1))
-                self.current_dewspread.set(round(temp - dewpt, 2))
-                if rh is not None:
-                    self.current_rh.set(round(rh, 1))
-
-            except Exception as e:
-                self.log(f"Error fetching weather data: {e}")
-
+            self.fetch_weather()  # call the same function here
             time.sleep(HUMIDITY_POLL_INTERVAL)
-
 
     # ---------------- Config Persistence ----------------
     def load_config(self):
