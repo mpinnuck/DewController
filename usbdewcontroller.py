@@ -11,17 +11,23 @@ import os
 import json
 
 # ------------ Commands to build executable ------------
-# .venv\Scripts\activate.ps1
-# pyinstaller --onefile --noconsole --name usbdewcontroller --add-data "config.json;." usbdewcontroller.py
-# copy dist/usbdewcontroller.exe d:/astro/apps/UsbDewController
-# -----------------------------------------------------
+r"""
+.venv\Scripts\activate.ps1
+pyinstaller --onefile --noconsole --name usbdewcontroller --add-data "config.json;." usbdewcontroller.py
+copy dist/usbdewcontroller.exe d:/astro/apps/UsbDewController
+"""
+# ----------------------------------------------------- 
 
 # ---------------- CONFIGURATION ----------------
-VERSION = "Version: 1.8"
+VERSION = "v1.9"
 CONFIG_FILE = "config.json"
 DEFAULT_DEWSPREAD_THRESHOLD = 3.0  # °C
 HYSTERESIS_DEW = 1.0  # °C for heater off
+# weather station url and key
 WEATHER_API_URL = "https://api.weather.com/v2/pws/observations/current?stationId=ISYDNEY478&format=json&units=m&apiKey=5356e369de454c6f96e369de450c6f22"
+WEATHER_API_URL_TEMPLATE = "https://api.weather.com/v2/pws/observations/current?stationId={station_id}&format=json&units=m&apiKey={api_key}"
+WEATHER_STATION_ID = "ISYDNEY478"
+WEATHER_API_KEY = "5356e369de454c6f96e369de450c6f22"
 REFRESH_INTERVAL = 5       # seconds for AUTO heater check
 HUMIDITY_POLL_INTERVAL = 60  # seconds for fetching current weather
 HEATER_ON_COLOR = "#90EE90"       # Light green for heater ON
@@ -55,11 +61,13 @@ class DewHeaterController(tk.Tk):
         # State variables
         self.serial_port = None
         self.mode = tk.StringVar(value=self.config_data.get("mode", "AUTO"))
-        self.dewspread_threshold = self.config_data.get("dewspread_threshold", DEFAULT_DEWSPREAD_THRESHOLD)
+        self.dewspread_threshold = tk.StringVar(value=self.config_data.get("dewspread_threshold", DEFAULT_DEWSPREAD_THRESHOLD))
         self.current_dewpoint = tk.DoubleVar(value=0.0)
         self.current_temp = tk.DoubleVar(value=0.0)
         self.current_dewspread = tk.DoubleVar(value=0.0)
         self.current_rh = tk.StringVar(value="0")
+        self.weather_station_id_var = tk.StringVar(value=self.config_data.get("weather_station_id", WEATHER_STATION_ID))
+
         self.heater_on = False
         self.running = True
 
@@ -104,7 +112,7 @@ class DewHeaterController(tk.Tk):
 
     # ---------------- GUI BUILD ----------------
     def build_gui(self):
-        self.title("Dew Heater Controller")
+        self.title(f"Dew Heater Controller {VERSION}")
         self.geometry("600x450")
         self.minsize(600, 300)
 
@@ -119,8 +127,11 @@ class DewHeaterController(tk.Tk):
         self.btn_connect = tk.Button(self, text="Connect", command=self.toggle_connection)
         self.btn_connect.grid(row=0, column=2, padx=5, pady=5, sticky="w")
 
-        self.lbl_version = tk.Label(self, text=VERSION, fg="blue")
-        self.lbl_version.grid(row=0, column=3, padx=5, pady=5, sticky="e")
+        # --- Weather Station ID Label + Entry ---
+        tk.Label(self, text="Weather Station ID:").grid(row=0, column=3, padx=(5, 2), pady=5, sticky="e")
+        self.entry_weather_station_id = ttk.Entry(self, textvariable=self.weather_station_id_var, width=12)
+        self.entry_weather_station_id.grid(row=0, column=4, padx=5, pady=5, sticky="w")
+        self.weather_station_id_var.trace_add("write", self.on_weather_station_change)
 
         # ---------------- Row 1: Mode + Manual ----------------
         self.btn_mode = tk.Button(self, text=f"Mode: {self.mode.get()}", width=15, command=self.toggle_mode)
@@ -151,9 +162,9 @@ class DewHeaterController(tk.Tk):
         row2_frame.grid(row=2, column=0, columnspan=8, sticky="ew", padx=5, pady=5)
 
         tk.Label(row2_frame, text="Dew Spread Trigger °C:").pack(side=tk.LEFT, padx=5)
-        self.entry_dewspread = tk.Entry(row2_frame, width=5)
-        self.entry_dewspread.insert(0, str(self.dewspread_threshold))
+        self.entry_dewspread = tk.Entry(row2_frame, textvariable=self.dewspread_threshold, width=5)
         self.entry_dewspread.pack(side=tk.LEFT, padx=(0, 15))
+        self.dewspread_threshold.trace_add("write", self.on_dewspread_threshold_change)
 
         tk.Label(row2_frame, text="Dew Spread °C:").pack(side=tk.LEFT, padx=5)
         tk.Label(row2_frame, textvariable=self.current_dewspread, bg="#d3d3d3", padx=5, pady=2, relief="sunken").pack(side=tk.LEFT, padx=(0, 15))
@@ -171,7 +182,23 @@ class DewHeaterController(tk.Tk):
         self.log_text.grid(row=3, column=0, columnspan=8, padx=5, pady=5, sticky="nsew")
         self.grid_rowconfigure(3, weight=1)
         self.grid_columnconfigure(7, weight=1)
+        # --- Enable Ctrl+C to copy selected log text ---
+        self.log_text.bind("<Control-c>", self.copy_selected_log)
 
+
+    def copy_selected_log(self, event=None):
+        try:
+            selected = self.log_text.get(tk.SEL_FIRST, tk.SEL_LAST)
+            self.clipboard_clear()
+            self.clipboard_append(selected)
+            self.update()  # ensures clipboard is updated
+            # Remove selection
+            self.log_text.tag_remove(tk.SEL, "1.0", tk.END)
+        except tk.TclError:
+            # No selection, do nothing
+            pass
+        return "break"
+    
     # ---------------- Auto-connect previous COM ----------------
     def auto_connect_previous_port(self):
         saved_port = self.config_data.get("com_port")
@@ -290,19 +317,20 @@ class DewHeaterController(tk.Tk):
     # ---------------- AUTO Monitoring ----------------
     def auto_monitor(self):
         while self.running:
+            fdewspread_threshold = 0.0
             try:
                 if self.mode.get() == "AUTO":
                     try:
-                        self.dewspread_threshold = float(self.entry_dewspread.get())
+                        fdewspread_threshold = float(self.entry_dewspread.get())
                     except ValueError:
                         self.log("Invalid Dew Spread threshold input")
                         time.sleep(REFRESH_INTERVAL)
                         continue
 
                     dewspread = self.current_dewspread.get()
-                    if not self.heater_on and dewspread <= self.dewspread_threshold:
+                    if not self.heater_on and dewspread <= fdewspread_threshold:
                         self.send_relay_command(True)
-                    elif self.heater_on and dewspread >= (self.dewspread_threshold + HYSTERESIS_DEW):
+                    elif self.heater_on and dewspread >= (fdewspread_threshold + HYSTERESIS_DEW):
                         self.send_relay_command(False)
 
             except Exception as e:
@@ -313,7 +341,8 @@ class DewHeaterController(tk.Tk):
     
     def fetch_weather(self):
         try:
-            response = requests.get(WEATHER_API_URL, timeout=10)
+            url = WEATHER_API_URL_TEMPLATE.format(station_id=self.weather_station_id_var.get(), api_key=WEATHER_API_KEY)
+            response = requests.get(url, timeout=10)
             data = response.json()['observations'][0]
             metric = data['metric']
             
@@ -324,7 +353,7 @@ class DewHeaterController(tk.Tk):
             # Instead of updating Tk variables directly here in the thread:
             self.after(0, self.update_weather_gui, temp, dewpt, rh)
 
-            self.log(f"Weather update: Temp={temp}°C, Dew={dewpt}°C, DewSpread={temp - dewpt}°C, RH={rh}%")
+        #    self.log(f"Weather update: Temp={temp}°C, Dew={dewpt}°C, DewSpread={temp - dewpt}°C, RH={rh}%")
             return temp, dewpt, rh
 
         except Exception as e:
@@ -345,6 +374,25 @@ class DewHeaterController(tk.Tk):
             self.fetch_weather()  # call the same function here
             time.sleep(HUMIDITY_POLL_INTERVAL)
 
+    # Events
+
+    def on_weather_station_change(self, *args):
+        self.config_data["weather_station_id"] = self.weather_station_id_var.get()
+        self.save_config()
+        self.log(f"Weather station updated to {self.weather_station_id_var.get()}")
+
+    def on_dewspread_threshold_change(self, *args):
+        val = self.dewspread_threshold.get()
+        try:
+            # Only save if valid float
+            float_val = float(val)
+            self.config_data["dewspread_threshold"] = val
+            self.save_config()
+            self.log(f"Dew Spread threshold updated to {val}°C")
+        except ValueError:
+            # Ignore invalid intermediate input (e.g., user typed "1." or "1a")
+            pass
+
     # ---------------- Config Persistence ----------------
     def load_config(self):
         if os.path.exists(CONFIG_FILE):
@@ -355,11 +403,13 @@ class DewHeaterController(tk.Tk):
                 return {}
         return {}
 
+
     def save_config(self):
         try:
             self.config_data["mode"] = self.mode.get()
-            self.config_data["dewspread_threshold"] = self.dewspread_threshold
+            self.config_data["dewspread_threshold"] = self.dewspread_threshold.get()
             self.config_data["com_port"] = self.combobox_ports.get()
+            self.config_data["weather_station_id"] = self.weather_station_id_var.get()
             with open(CONFIG_FILE, "w") as f:
                 json.dump(self.config_data, f)
         except Exception as e:
