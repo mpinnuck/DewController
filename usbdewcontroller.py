@@ -19,7 +19,7 @@ copy dist/usbdewcontroller.exe d:/astro/apps/UsbDewController
 # ----------------------------------------------------- 
 
 # ---------------- CONFIGURATION ----------------
-VERSION = "v1.9"
+VERSION = "v1.10"
 CONFIG_FILE = "config.json"
 DEFAULT_DEWSPREAD_THRESHOLD = 3.0  # °C
 HYSTERESIS_DEW = 1.0  # °C for heater off
@@ -92,7 +92,6 @@ class DewHeaterController(tk.Tk):
         # Threads
         threading.Thread(target=self.auto_monitor, daemon=True).start()
         threading.Thread(target=self.poll_current_weather, daemon=True).start()
-        self.refresh_serial_ports()
 
         # Auto-connect previous port
         self.auto_connect_previous_port()
@@ -117,12 +116,18 @@ class DewHeaterController(tk.Tk):
         self.minsize(600, 300)
 
         # ---------------- Row 0: COM Port ----------------
-        tk.Label(self, text="COM Port:").grid(row=0, column=0, padx=5, pady=5, sticky="w")
-        self.combobox_ports = ttk.Combobox(self, values=self.get_serial_ports(), state="readonly")
-        self.combobox_ports.grid(row=0, column=1, padx=5, pady=5, sticky="w")
+        saved_port = self.config_data.get("com_port", None)
 
-        if self.config_data.get("com_port") in self.combobox_ports['values']:
-            self.combobox_ports.set(self.config_data["com_port"])
+        # Display the configured port as readonly
+        tk.Label(self, text="COM Port:").grid(row=0, column=0, padx=5, pady=5, sticky="w")
+
+        if saved_port:
+            # Show port in a readonly Combobox (optional, can also be a Label if you never change it)
+            self.combobox_ports = ttk.Combobox(self, values=[saved_port], state="readonly", width=10)
+            self.combobox_ports.set(saved_port)
+        else:
+            self.combobox_ports = ttk.Combobox(self, values=[], state="readonly", width=10)
+        self.combobox_ports.grid(row=0, column=1, padx=5, pady=5, sticky="w")
 
         self.btn_connect = tk.Button(self, text="Connect", command=self.toggle_connection)
         self.btn_connect.grid(row=0, column=2, padx=5, pady=5, sticky="w")
